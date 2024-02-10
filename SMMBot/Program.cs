@@ -1,4 +1,5 @@
-﻿using System.Configuration;
+﻿using MySql.Data.MySqlClient;
+using System.Configuration;
 using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
@@ -14,13 +15,14 @@ namespace SMMBot
 
         static void Main(string[] args)
         {
-            botClient = new TelegramBotClient("YOUR_BOT_TOKEN_HERE");
+            botClient = new TelegramBotClient("YOUR-TOKEN-HERE");
 
             bdCon.Server = ConfigurationManager.AppSettings.Get("BDServer");
             bdCon.BDName = ConfigurationManager.AppSettings.Get("BDName");
             bdCon.UserName = ConfigurationManager.AppSettings.Get("UserName");
             bdCon.Password = ConfigurationManager.AppSettings.Get("Password");
 
+            Console.WriteLine("Enter any key to close the bot!\n\n");
             botClient.StartReceiving(updateHandler, errorHandler);
 
             Console.ReadLine();
@@ -44,6 +46,7 @@ namespace SMMBot
         async static Task updateHandler(ITelegramBotClient botClient, Update update, CancellationToken token)
         {
             string methodType = "";
+            string destinationFilePath = "DESTINATION-TO-SAVE-THE-FILE";
 
             var getButtons = new ReplyKeyboardMarkup(new[]
             {
@@ -57,10 +60,12 @@ namespace SMMBot
             if (update.Type == UpdateType.Message && update.Message.Document != null && bdCon.IsConnect())
             {
                 var fileId = update.Message.Document.FileId;
-                var fileInfo = await botClient.GetFileAsync(fileId);
-                var filePath = fileInfo.FilePath;
-                var fileSize = fileInfo.FileSize;
-                var fileTitle = update.Message.Document.FileName;
+
+                await using Stream fileStream = System.IO.File.Create(destinationFilePath);
+                var file = await botClient.GetInfoAndDownloadFileAsync(
+                    fileId: fileId,
+                    destination: fileStream,
+                    cancellationToken: token);
 
                 await botClient.SendTextMessageAsync(update.Message.Chat.Id, "К какой категории загрузить документ?", replyMarkup: getButtons);
             }
@@ -68,33 +73,56 @@ namespace SMMBot
             {
                 if (update.Message.Text.ToLower() == "пример")
                 {
-                    methodType = "pics_for_examples";
+                    methodType = "TABLE-NAME-FOR-EXAMPLES";
                 }
                 else if (update.Message.Text.ToLower() == "отзыв")
                 {
-                    methodType = "pics_for_reviews";
+                    methodType = "TABLE-NAME-FOR-REVIEWS";
                 }
 
                 if (!string.IsNullOrEmpty(methodType))
                 {
-                    await botClient.SendTextMessageAsync(update.Message.Chat.Id, "Добавьте описание.", replyMarkup: null);
+                    await botClient.SendTextMessageAsync(update.Message.Chat.Id, "Документ обрабатывается...");
+                    Console.WriteLine("Downloading photo for " + methodType + " from " 
+                                        + update.Message.Chat.Username + " at " + DateTime.Now);
+                    try
+                    {
+                        using (StreamReader sr = new StreamReader(destinationFilePath))
+                        {
+                            using (MemoryStream ms = new MemoryStream())
+                            {
+                                sr.BaseStream.CopyTo(ms);
+                                var bytes = ms.ToArray();
+                                var fileSize = ms.Length;
+
+                                var command = new MySqlCommand("", bdCon.Connection);
+
+                                command.CommandText = "INSERT INTO " + methodType + " (pic_id, pic_blob, pic_date, pic_descr, pic_type, pic_size) VALUES (DEFAULT, @blob, "
+                                                        + "CURDATE(), null, \"jpg\", @size);";
+                                var paramBlob = new MySqlParameter("@blob", MySqlDbType.LongBlob);
+                                var paramSize = new MySqlParameter("@size", MySqlDbType.Float, 200);
+
+                                paramBlob.Value = bytes;
+                                paramSize.Value = fileSize;
+
+                                command.Parameters.Add(paramBlob);
+                                command.Parameters.Add(paramSize);
+
+                                command.ExecuteNonQuery();
+                            }
+                        }
+                        System.IO.File.Delete(destinationFilePath);
+
+                        await botClient.SendTextMessageAsync(update.Message.Chat.Id, "Документ успешно загружен!");
+                    } catch (Exception ex) 
+                    {
+                        await botClient.SendTextMessageAsync(update.Message.Chat.Id, "Произошла ошибка! Смотрите в консоль!");
+                        Console.WriteLine(ex.ToString() + "\n\n" + ex.StackTrace);
+                    }
+                    
                 }
             }
-            else if (update.Type == UpdateType.Message && update.Message.Text != null && !string.IsNullOrEmpty(methodType))
-            {
-                var description = update.Message.Text;
-                Console.WriteLine(123); // Не приходит сюды
-                /*
-                var command = new MySqlCommand();
-                command.CommandText = "INSERT INTO @table_name (pic_id, pic_blob, pic_date, pic_descr, pic_type, pic_size) VALUES (DEFAULT, @blob, " 
-                                        + DateTime.Now.ToString("dd.MM.yyyy") 
-                                        + ", @description, @type, @size);";
-                var paramTableName = new MySqlParameter("@table_name", MySqlDbType.VarChar, methodType.Length, methodType);
-                var paramBlob = new MySqlParameter("@blob", MySqlDbType.Blob, bytes.Length);
-                */
-
-                await botClient.SendTextMessageAsync(update.Message.Chat.Id, "Документ успешно загружен!");
-            }
+            
         }
     }
 }
